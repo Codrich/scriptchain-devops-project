@@ -1,0 +1,9 @@
+# ScriptChain Health – Lambda Runtime Dependencies
+#
+# boto3 is intentionally EXCLUDED: the Lambda runtime already provides it,
+# so bundling it would bloat the deployment package unnecessarily.
+#
+# Pin exact versions to guarantee reproducible builds.
+
+requests==2.31.0               # HTTP calls to external APIs
+aws-lambda-powertools==2.34.2  # structured logging, tracing, and metrics helpers
