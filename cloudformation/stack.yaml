@@ -1,0 +1,188 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ScriptChain Health – DevOps Interview Submission
+  Provisions an S3 bucket and an EC2 instance with least-privilege IAM access.
+  Author: Richard Kweku Addae
+
+# =============================================================================
+# PARAMETERS – supplied at deploy time; keeps the template reusable
+# =============================================================================
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Deployment environment (controls naming and tagging)
+
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 key pair for SSH access
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    AllowedValues: [t2.micro, t2.small, t2.medium]
+    Description: EC2 instance type (t2.micro is Free Tier eligible)
+
+  AllowedSSHCidr:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: >
+      CIDR range permitted to SSH into the EC2 instance.
+      Restrict this to your IP in production (e.g. 203.0.113.10/32).
+
+# =============================================================================
+# MAPPINGS – region-to-AMI lookup (Amazon Linux 2023)
+# Using Mappings instead of a hardcoded AMI ID makes the template
+# portable across regions without manual changes.
+# =============================================================================
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c101f26f147fa7fd   # Amazon Linux 2023 – N. Virginia
+    us-east-2:
+      AMI: ami-0b20a6f09484773af   # Amazon Linux 2023 – Ohio
+    us-west-2:
+      AMI: ami-0735c191cf914754d   # Amazon Linux 2023 – Oregon
+
+# =============================================================================
+# RESOURCES
+# =============================================================================
+Resources:
+
+  # ---------------------------------------------------------------------------
+  # S3 Bucket
+  # ---------------------------------------------------------------------------
+  ScriptChainBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "scriptchain-${EnvironmentName}-${AWS::AccountId}-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: ScriptChainHealth
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # ---------------------------------------------------------------------------
+  # Security Group
+  # ---------------------------------------------------------------------------
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and HTTP inbound traffic to ScriptChain EC2
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHCidr
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub "scriptchain-${EnvironmentName}-sg"
+
+  # ---------------------------------------------------------------------------
+  # IAM Role + Instance Profile
+  # Grants EC2 least-privilege read access to S3.
+  # Using a role avoids embedding static credentials on the instance.
+  # ---------------------------------------------------------------------------
+  EC2S3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "scriptchain-ec2-role-${EnvironmentName}"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3BucketReadAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt ScriptChainBucket.Arn
+                  - !Sub "${ScriptChainBucket.Arn}/*"
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2S3Role
+
+  # ---------------------------------------------------------------------------
+  # EC2 Instance
+  # AMI resolved via Mappings – no hardcoded IDs.
+  # UserData bootstraps Apache on first launch.
+  # ---------------------------------------------------------------------------
+  ScriptChainEC2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SecurityGroups:
+        - !Ref EC2SecurityGroup
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd aws-cli
+          systemctl enable httpd
+          systemctl start httpd
+          echo "<h1>ScriptChain Health | ${EnvironmentName}</h1>" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: !Sub "scriptchain-${EnvironmentName}-ec2"
+        - Key: Environment
+          Value: !Ref EnvironmentName
+        - Key: Project
+          Value: ScriptChainHealth
+
+# =============================================================================
+# OUTPUTS
+# =============================================================================
+Outputs:
+
+  BucketName:
+    Description: Name of the created S3 bucket
+    Value: !Ref ScriptChainBucket
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketName"
+
+  BucketArn:
+    Description: ARN of the S3 bucket
+    Value: !GetAtt ScriptChainBucket.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-BucketArn"
+
+  EC2InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref ScriptChainEC2
+
+  EC2PublicIP:
+    Description: Public IP address of the EC2 instance
+    Value: !GetAtt ScriptChainEC2.PublicIp
